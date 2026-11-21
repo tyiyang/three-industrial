@@ -12,12 +12,17 @@ import { useSimulation } from './composables/useSimulation'
 const store = useDemoStore()
 useSimulation()
 const sceneRef = ref<InstanceType<typeof Scene3D> | null>(null)
+const mobilePanel = ref<'none' | 'data' | 'alarms'>('none')
 
 function locate(id: number) {
   sceneRef.value?.flyToDevice(id)
+  if (window.innerWidth <= 900) mobilePanel.value = 'none'
 }
 function preset(p: 'overview' | 'top' | 'aisle') {
   sceneRef.value?.applyPreset(p)
+}
+function togglePanel(p: 'data' | 'alarms') {
+  mobilePanel.value = mobilePanel.value === p ? 'none' : p
 }
 </script>
 
@@ -30,12 +35,12 @@ function preset(p: 'overview' | 'top' | 'aisle') {
       </div>
       <div class="right">
         <span class="badge"><i class="dot pulse"></i>{{ store.connected ? '数据链路已连接' : '连接中…' }}</span>
-        <span>Worker 仿真 · {{ store.intervalMs / 1000 }}s / 次</span>
-        <span>推送 {{ store.tickCount }} 批</span>
+        <span class="desktop-only">Worker 仿真 · {{ store.intervalMs / 1000 }}s / 次</span>
+        <span class="desktop-only">推送 {{ store.tickCount }} 批</span>
       </div>
     </header>
     <div class="main">
-      <aside class="sidebar left">
+      <aside class="sidebar left" :class="{ 'mobile-open': mobilePanel === 'data' }">
         <DataPanel @locate="locate" />
       </aside>
       <section class="stage">
@@ -44,9 +49,17 @@ function preset(p: 'overview' | 'top' | 'aisle') {
         <PerfHUD />
         <Timeline />
       </section>
-      <aside class="sidebar right">
+      <aside class="sidebar right" :class="{ 'mobile-open': mobilePanel === 'alarms' }">
         <AlarmCenter @locate="locate" />
       </aside>
+      <div v-if="mobilePanel !== 'none'" class="mobile-backdrop" @click="mobilePanel = 'none'"></div>
     </div>
+    <nav class="mobile-tabs">
+      <button :class="{ on: mobilePanel === 'data' }" @click="togglePanel('data')">数据看板</button>
+      <button class="scene-tab" @click="mobilePanel = 'none'">三维场景</button>
+      <button :class="{ on: mobilePanel === 'alarms' }" @click="togglePanel('alarms')">
+        告警 <span v-if="store.unackCount" class="tab-badge">{{ store.unackCount }}</span>
+      </button>
+    </nav>
   </div>
 </template>

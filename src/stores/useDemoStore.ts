@@ -72,6 +72,10 @@ export const useDemoStore = defineStore('demo', () => {
   const selectMode = ref(false)
   const measureMode = ref(false)
   const cameraPreset = ref<'overview' | 'top' | 'aisle' | null>(null)
+  const patrolMode = ref(false)
+  const patrolSpeed = ref(1)
+  const poiEnabled = ref(true)
+  const activePoi = ref<string | null>(null)
   const searchQuery = ref('')
   const filterState = ref<DeviceState | 'all'>('all')
   const filterType = ref<DeviceType | 'all'>('all')
@@ -215,6 +219,7 @@ export const useDemoStore = defineStore('demo', () => {
     devices, alarms, histories, snapshots, selectedIds, hoveredId,
     connected, tickCount, lastUpdate, paused, intervalMs,
     dayMode, lodEnabled, selectMode, measureMode, cameraPreset,
+    patrolMode, patrolSpeed, poiEnabled, activePoi,
     searchQuery, filterState, filterType, alarmFilter,
     playbackMode, playbackIndex, perf,
     stateCounts, typeCounts, alarmList, activeAlarmCount, unackCount,

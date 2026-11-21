@@ -9,8 +9,11 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutlinePass } from 'three/examples/jsm/postprocessing/OutlinePass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { Group as TweenGroup, Tween, Easing } from '@tweenjs/tween.js'
 import { buildCampus, SPACING, type CampusResult } from '../core/campus'
+import { ParticleSystems } from '../core/particles'
+import { buildPoiMarkers, buildPatrolPath, type PoiMarkers } from '../core/poi'
 import { useDemoStore, GRID_COLS, GRID_ROWS } from '../stores/useDemoStore'
 import {
   DEVICE_TYPES, STATE_COLOR, STATE_LABEL, TYPE_MODEL,
@@ -25,6 +28,7 @@ const loadError = ref(false)
 const hoverTip = ref<{ x: number; y: number; name: string; state: DeviceState; temp: number } | null>(null)
 const boxRect = ref<{ x: number; y: number; w: number; h: number } | null>(null)
 const measureInfo = ref('')
+const poiCard = ref<{ x: number; y: number; title: string; desc: string; stats: string } | null>(null)
 
 let renderer: THREE.WebGLRenderer
 let labelRenderer: CSS2DRenderer
@@ -55,6 +59,12 @@ const labelObjects: CSS2DObject[] = []
 let measureLine: THREE.Line | null = null
 let measurePoints: THREE.Vector3[] = []
 
+let particles: ParticleSystems
+let poi: PoiMarkers
+let patrolPath: ReturnType<typeof buildPatrolPath>
+let patrolT = 0
+let lastFrameTime = 0
+
 let fpsFrames = 0
 let fpsTime = 0
 let lowFpsStreak = 0
@@ -71,15 +81,42 @@ for (let i = 0; i < store.devices.length; i++) devicePositions.push(devicePositi
 function fallbackGeometry(): THREE.BufferGeometry {
   const g = new THREE.BoxGeometry(0.9, 1.3, 0.9)
   g.translate(0, 0.65, 0)
+  applyUniformVertexColor(g, 0.85)
   return g
 }
 
+/** 把 glTF 多材质、多部件合并为单个带顶点色的几何体：保留细节配色，同时维持 1 DrawCall/类型 */
+function applyUniformVertexColor(geo: THREE.BufferGeometry, shade: number) {
+  const count = geo.getAttribute('position').count
+  const colors = new Float32Array(count * 3).fill(shade)
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+}
+
 function extractGeometry(gltf: { scene: THREE.Group }): THREE.BufferGeometry | null {
-  let geo: THREE.BufferGeometry | null = null
+  const parts: THREE.BufferGeometry[] = []
+  gltf.scene.updateMatrixWorld(true)
   gltf.scene.traverse((obj) => {
-    if (!geo && (obj as THREE.Mesh).isMesh) geo = (obj as THREE.Mesh).geometry.clone()
+    const mesh = obj as THREE.Mesh
+    if (!mesh.isMesh) return
+    const g = mesh.geometry.clone()
+    g.applyMatrix4(mesh.matrixWorld)
+    // 材质基础色烘焙进顶点色；明暗层次保留，状态色仍通过 instanceColor 相乘
+    const mat = mesh.material as THREE.MeshStandardMaterial
+    const c = mat?.color ?? new THREE.Color(0xffffff)
+    applyUniformVertexColor(g, 1)
+    const attr = g.getAttribute('color')
+    for (let i = 0; i < attr.count; i++) attr.setXYZ(i, c.r, c.g, c.b)
+    if (!g.getAttribute('normal')) g.computeVertexNormals()
+    parts.push(g)
   })
-  return geo
+  if (!parts.length) return null
+  try {
+    const merged = mergeGeometries(parts, false)
+    parts.forEach((p) => p.dispose())
+    return merged
+  } catch {
+    return parts[0]
+  }
 }
 
 function buildInstanced(geometries: Map<DeviceType, THREE.BufferGeometry>) {
@@ -90,7 +127,9 @@ function buildInstanced(geometries: Map<DeviceType, THREE.BufferGeometry>) {
   deviceSlots = new Map()
   for (const [type, ids] of members) {
     const geo = geometries.get(type) ?? fallbackGeometry()
-    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.48, metalness: 0.32 })
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xffffff, vertexColors: true, roughness: 0.48, metalness: 0.32,
+    })
     const high = new THREE.InstancedMesh(geo, mat, ids.length)
     high.name = `devices-${type}`
     high.castShadow = true
@@ -229,6 +268,13 @@ function setupScene(geometries: Map<DeviceType, THREE.BufferGeometry>) {
 
   buildInstanced(geometries)
 
+  particles = new ParticleSystems()
+  scene.add(particles.group)
+
+  poi = buildPoiMarkers()
+  scene.add(poi.group)
+  patrolPath = buildPatrolPath()
+
   highlightGroup = new THREE.Group()
   scene.add(highlightGroup)
 
@@ -277,12 +323,41 @@ function setupScene(geometries: Map<DeviceType, THREE.BufferGeometry>) {
   animate()
 }
 
-function pickDevice(clientX: number, clientY: number): number | null {
-  if (!container.value) return null
-  const rect = container.value.getBoundingClientRect()
+function setRayFromClient(clientX: number, clientY: number) {
+  const rect = container.value!.getBoundingClientRect()
   pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1
   pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1
   raycaster.setFromCamera(pointer, camera)
+  return rect
+}
+
+function pickPoi(clientX: number, clientY: number) {
+  if (!poi || !store.poiEnabled) return null
+  setRayFromClient(clientX, clientY)
+  const hits = raycaster.intersectObjects(poi.sprites, false)
+  return hits.length ? poi.getDef(hits[0].object as THREE.Sprite) : null
+}
+
+function openPoiCard(id: string, clientX: number, clientY: number) {
+  const def = poi.sprites.map((s) => poi.getDef(s)).find((d) => d?.id === id)
+  if (!def) return
+  const devices = store.devices.filter((d) => def.deviceFilter(d))
+  const alarms = store.alarmList.filter((a) => devices.some((d) => d.id === a.deviceId)).length
+  const avgTemp = devices.length
+    ? (devices.reduce((s, d) => s + d.temperature, 0) / devices.length).toFixed(1)
+    : '--'
+  const rect = container.value!.getBoundingClientRect()
+  poiCard.value = {
+    x: clientX - rect.left, y: clientY - rect.top,
+    title: def.title, desc: def.desc,
+    stats: `${devices.length} 台设备 · ${alarms} 条告警 · 均温 ${avgTemp}°C`,
+  }
+  store.activePoi = id
+}
+
+function pickDevice(clientX: number, clientY: number): number | null {
+  if (!container.value) return null
+  setRayFromClient(clientX, clientY)
   const objects: THREE.Object3D[] = []
   for (const set of meshSets.values()) objects.push(set.high.visible ? set.high : set.low)
   const hits = raycaster.intersectObjects(objects, false)
@@ -300,6 +375,16 @@ function onPointerDown(e: PointerEvent) {
 }
 
 function onPointerUp(e: PointerEvent) {
+  // POI 热点优先于设备拾取（测距/框选模式除外）
+  if (!store.selectMode && !store.measureMode) {
+    const def = pickPoi(e.clientX, e.clientY)
+    if (def) {
+      openPoiCard(def.id, e.clientX, e.clientY)
+      return
+    }
+    poiCard.value = null
+    store.activePoi = null
+  }
   if (store.measureMode) {
     handleMeasureClick(e)
     boxRect.value = null
@@ -332,6 +417,8 @@ function onPointerUp(e: PointerEvent) {
 }
 
 function onPointerMove(e: PointerEvent) {
+  // 触摸拖拽交给 OrbitControls 处理，不触发 hover tooltip / 框选
+  if (e.pointerType === 'touch') return
   if (boxRect.value && container.value) {
     const rect = container.value.getBoundingClientRect()
     boxRect.value.w = e.clientX - rect.left - boxRect.value.x
@@ -429,15 +516,28 @@ function clearMeasure() {
 
 function animate() {
   animId = requestAnimationFrame(animate)
-  tweenGroup.update(performance.now())
+  const now = performance.now()
+  const dt = Math.min(0.05, (now - lastFrameTime) / 1000) || 0.016
+  lastFrameTime = now
+  tweenGroup.update(now)
+  if (store.patrolMode && patrolPath) {
+    patrolT = (patrolT + dt * 0.018 * store.patrolSpeed) % 1
+    const cp = patrolPath.camera.getPointAt(patrolT)
+    const tp = patrolPath.target.getPointAt(patrolT)
+    camera.position.copy(cp)
+    controls.target.copy(tp)
+  }
   controls.update()
+  particles?.sync(
+    store.devices, devicePositions, dt,
+    store.replaySnapshot ? store.replaySnapshot.states : undefined,
+  )
   // 无选中对象时跳过描边通道：省一次全场景深度渲染
   outlinePass.enabled = outlinePass.selectedObjects.length > 0
   composer.render()
   labelRenderer.render(scene, camera)
 
   fpsFrames++
-  const now = performance.now()
   if (now - fpsTime >= 500) {
     const fps = Math.round((fpsFrames * 1000) / (now - fpsTime))
     store.perf.fps = fps
@@ -452,6 +552,7 @@ function animate() {
       qualityReduced = true
       bloomPass.enabled = false
       renderer.shadowMap.enabled = false
+      particles?.setEnabled(false)
     }
     fpsFrames = 0
     fpsTime = now
@@ -492,6 +593,8 @@ onBeforeUnmount(() => {
   renderer.domElement.removeEventListener('dblclick', onDoubleClick)
   controls?.dispose()
   campus?.dispose()
+  particles?.dispose()
+  poi?.dispose()
   composer?.dispose()
   renderer.dispose()
   renderer.domElement.remove()
@@ -510,6 +613,16 @@ watch(() => store.lodEnabled, (v) => {
 })
 watch(() => store.cameraPreset, (p) => { if (p) applyPreset(p) })
 watch(() => store.measureMode, (v) => { if (!v) clearMeasure() })
+watch(() => store.poiEnabled, (v) => { if (poi) poi.group.visible = v; if (!v) { poiCard.value = null; store.activePoi = null } })
+// 巡检时用户主动旋转/缩放则自动退出，避免抢占相机
+watch(() => store.patrolMode, (v) => {
+  if (!v) return
+  const stop = () => {
+    if (store.patrolMode) store.patrolMode = false
+    controls.removeEventListener('start', stop)
+  }
+  controls.addEventListener('start', stop)
+})
 
 defineExpose({ flyToDevice, applyPreset })
 </script>
@@ -531,6 +644,12 @@ defineExpose({ flyToDevice, applyPreset })
     }"></div>
     <div v-if="loadError" class="scene-hint" style="color: #f59e0b">部分 glTF 加载失败，已用内置几何体降级</div>
     <div v-if="measureInfo" class="measure-tip">{{ measureInfo }}</div>
+    <div v-if="poiCard" class="poi-card" :style="{ left: poiCard.x + 'px', top: poiCard.y + 'px' }">
+      <div class="poi-title">{{ poiCard.title }}</div>
+      <div class="poi-desc">{{ poiCard.desc }}</div>
+      <div class="poi-stats">{{ poiCard.stats }}</div>
+      <button class="poi-close" @click="poiCard = null; store.activePoi = null">×</button>
+    </div>
     <div class="scene-hint">
       {{ store.selectMode ? '框选模式：拖拽框选' : store.measureMode ? '测距模式：点击地面两点' : '左键旋转 · 滚轮缩放 · 点击选中 · 双击聚焦' }}
     </div>

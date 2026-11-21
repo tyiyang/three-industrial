@@ -33,6 +33,16 @@ function search() {
         {{ store.dayMode ? '夜景' : '日景' }}
       </button>
       <button :class="{ on: store.lodEnabled }" @click="store.lodEnabled = !store.lodEnabled">LOD</button>
+      <button :class="{ on: store.poiEnabled }" @click="store.poiEnabled = !store.poiEnabled">热点</button>
+    </div>
+    <div class="tool-group">
+      <span class="tool-label">巡检</span>
+      <button :class="{ on: store.patrolMode }" @click="store.patrolMode = !store.patrolMode">
+        {{ store.patrolMode ? '停止' : '巡游' }}
+      </button>
+      <button :disabled="!store.patrolMode" @click="store.patrolSpeed = store.patrolSpeed >= 2 ? 0.5 : store.patrolSpeed + 0.5">
+        {{ store.patrolSpeed }}x
+      </button>
     </div>
     <div class="tool-group search-group">
       <input v-model="query" placeholder="搜索设备名 / 编号 / 区域" @keyup.enter="search" />
