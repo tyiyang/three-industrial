@@ -1,48 +1,52 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted } from 'vue'
+import { ref } from 'vue'
 import Scene3D from './components/Scene3D.vue'
 import DataPanel from './components/DataPanel.vue'
-import { useDeviceStore } from './composables/useDeviceStore'
-import { MockDeviceSocket } from './composables/useMockWebSocket'
+import AlarmCenter from './components/AlarmCenter.vue'
+import Toolbar from './components/Toolbar.vue'
+import PerfHUD from './components/PerfHUD.vue'
+import Timeline from './components/Timeline.vue'
+import { useDemoStore } from './stores/useDemoStore'
+import { useSimulation } from './composables/useSimulation'
 
-const { connected, applyMessage } = useDeviceStore()
-let socket: MockDeviceSocket | null = null
+const store = useDemoStore()
+useSimulation()
+const sceneRef = ref<InstanceType<typeof Scene3D> | null>(null)
 
-onMounted(() => {
-  socket = new MockDeviceSocket()
-  socket.onopen = () => {
-    connected.value = true
-  }
-  socket.onmessage = (msg) => applyMessage(msg)
-  socket.onclose = () => {
-    connected.value = false
-  }
-  socket.connect()
-})
-
-onBeforeUnmount(() => socket?.close())
+function locate(id: number) {
+  sceneRef.value?.flyToDevice(id)
+}
+function preset(p: 'overview' | 'top' | 'aisle') {
+  sceneRef.value?.applyPreset(p)
+}
 </script>
 
 <template>
   <div class="app">
     <header class="topbar">
       <div>
-        <h1>工业园区 · 三维可视化监控</h1>
-        <span class="sub">Three.js + Vue3 + TypeScript · 实例化渲染 Demo</span>
+        <h1>工业园区 · 三维可视化监控平台</h1>
+        <span class="sub">Three.js + Vue3 + Pinia + TypeScript · 多模型实例化 · 状态机 · 实时告警</span>
       </div>
       <div class="right">
-        <span class="badge">
-          <i class="dot pulse"></i>
-          {{ connected ? '数据链路已连接' : '连接中…' }}
-        </span>
-        <span>模拟 WebSocket · 2s / 次</span>
+        <span class="badge"><i class="dot pulse"></i>{{ store.connected ? '数据链路已连接' : '连接中…' }}</span>
+        <span>Worker 仿真 · {{ store.intervalMs / 1000 }}s / 次</span>
+        <span>推送 {{ store.tickCount }} 批</span>
       </div>
     </header>
     <div class="main">
-      <aside class="sidebar">
-        <DataPanel />
+      <aside class="sidebar left">
+        <DataPanel @locate="locate" />
       </aside>
-      <Scene3D />
+      <section class="stage">
+        <Toolbar @preset="preset" @locate="locate" />
+        <Scene3D ref="sceneRef" />
+        <PerfHUD />
+        <Timeline />
+      </section>
+      <aside class="sidebar right">
+        <AlarmCenter @locate="locate" />
+      </aside>
     </div>
   </div>
 </template>
